@@ -12,6 +12,8 @@ local Camera = workspace.CurrentCamera
 local DRONE_ASSET_ID = 16531510943
 local REMOTE_ASSET_ID = 4856121831
 local GIF_URL = "https://raw.githubusercontent.com/egdemoakola-gif/shahed/main/shahed.gif"
+local SOUND_FLIGHT = "rbxassetid://1843828305"
+local SOUND_SHOT = "rbxassetid://9114362753"
 local BASE_SPEED = 60
 local BOOST_SPEED = 140
 local ULTRA_SPEED = 320
@@ -46,9 +48,7 @@ local repairing = false
 local riddenWreck = nil
 local lastRocket = 0
 local mountWreck
-local userHoldingController = false
-local currentController = nil
-local rebuildCooldown = 0
+local flightSound = nil
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 
@@ -69,9 +69,31 @@ screen.ResetOnSpawn = false
 screen.DisplayOrder = 2147483647
 screen.Parent = parent
 
+-- GIF loading - adminka pattern
+local GIF_FILE = "shahed_loading.gif"
+
+local function downloadGif()
+    if isfile and getcustomasset then
+        if isfile(GIF_FILE) then
+            local ok, a = pcall(getcustomasset, GIF_FILE)
+            if ok and a and a ~= "" then return a end
+        end
+    end
+    if writefile and getcustomasset then
+        local ok, data = pcall(function() return game:HttpGet(GIF_URL, true) end)
+        if ok and data and #data > 100 then
+            pcall(writefile, GIF_FILE, data)
+            local ok2, a = pcall(getcustomasset, GIF_FILE)
+            if ok2 and a and a ~= "" then return a end
+        end
+    end
+    return nil
+end
+
+local gifAsset = nil
+
 -- LOADING SCREEN
 local loadingOverlay = Instance.new("Frame")
-loadingOverlay.Name = "LoadingOverlay"
 loadingOverlay.Size = UDim2.fromScale(1, 1)
 loadingOverlay.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 loadingOverlay.BorderSizePixel = 0
@@ -92,6 +114,13 @@ gifImage.ScaleType = Enum.ScaleType.Fit
 gifImage.Image = ""
 gifImage.ZIndex = 10001
 gifImage.Parent = gifHolder
+
+task.spawn(function()
+    gifAsset = downloadGif()
+    if gifAsset and gifImage and gifImage.Parent then
+        gifImage.Image = gifAsset
+    end
+end)
 
 local progressBg = Instance.new("Frame")
 progressBg.Size = UDim2.fromOffset(600, 20)
@@ -132,48 +161,21 @@ statusLabel.Font = Enum.Font.Gotham
 statusLabel.ZIndex = 10000
 statusLabel.Parent = loadingOverlay
 
--- GIF download
-local gifAsset = ""
-task.spawn(function()
-    pcall(function()
-        if writefile and isfile and getcustomasset and isfolder and makefolder then
-            if not isfolder("shahed") then makefolder("shahed") end
-            local gifPath = "shahed/loading.gif"
-            if not isfile(gifPath) then
-                local bytes = game:HttpGet(GIF_URL)
-                if bytes and #bytes > 0 then
-                    writefile(gifPath, bytes)
-                end
-            end
-            if isfile(gifPath) then
-                local ok, asset = pcall(getcustomasset, gifPath)
-                if ok and asset then
-                    gifAsset = asset
-                    pcall(function() gifImage.Image = asset end)
-                end
-            end
-        end
-    end)
-end)
-
-local function setProgress(pct, txt)
+local function setProgress(pct)
     progressFill.Size = UDim2.fromScale(pct / 100, 1)
     progressLabel.Text = tostring(pct) .. "%"
-    if txt then statusLabel.Text = txt end
 end
 
 task.spawn(function()
-    local target = 100
     local current = 0
-    while current < target do
+    while current < 100 do
         current = current + math.random(2, 5)
-        if current > target then current = target end
+        if current > 100 then current = 100 end
         setProgress(current)
         task.wait(0.04)
     end
 end)
 
--- Main UI hidden during loading
 local uiRoot = Instance.new("Frame")
 uiRoot.Size = UDim2.fromScale(1, 1)
 uiRoot.BackgroundTransparency = 1
@@ -300,6 +302,53 @@ local function getSitOffset()
     local primary = droneObject.PrimaryPart or droneObject:FindFirstChildWhichIsA("BasePart")
     if not primary then return 3.8 end
     return primary.Size.Y / 2 + SIT_GAP
+end
+
+-- SOUNDS
+local function getDroneSoundParent()
+    if camSubject and camSubject.Parent then return camSubject end
+    if droneObject then
+        local p = droneObject.PrimaryPart or droneObject:FindFirstChildWhichIsA("BasePart")
+        if p then return p end
+    end
+    return nil
+end
+
+local function startFlightSound()
+    if flightSound then return end
+    local parent = getDroneSoundParent()
+    if not parent then return end
+    local s = Instance.new("Sound")
+    s.Name = "ShahedFlight"
+    s.SoundId = SOUND_FLIGHT
+    s.Volume = 0.4
+    s.Looped = true
+    s.Parent = parent
+    s:Play()
+    flightSound = s
+end
+
+local function stopFlightSound()
+    if flightSound then
+        pcall(function() flightSound:Stop() end)
+        pcall(function() flightSound:Destroy() end)
+        flightSound = nil
+    end
+end
+
+local function playShotSound()
+    local parent = getDroneSoundParent()
+    if not parent then return end
+    local s = Instance.new("Sound")
+    s.SoundId = SOUND_SHOT
+    s.Volume = 0.8
+    s.Parent = parent
+    s:Play()
+    task.delay(3, function()
+        pcall(function()
+            if s and s.Parent then s:Destroy() end
+        end)
+    end)
 end
 
 local function spawnExplosion(pos)
@@ -463,75 +512,7 @@ local function buildFallbackTool()
     return tool
 end
 
-local buildTool
-
-local function buildFallbackDrone()
-    local m = Instance.new("Model")
-    m.Name = "ShahedDrone"
-
-    local body = Instance.new("Part")
-    body.Name = "Body"
-    body.Size = Vector3.new(2, 2, 8)
-    body.Color = Color3.fromRGB(200, 195, 175)
-    body.Material = Enum.Material.SmoothPlastic
-    body.Anchored = true
-    body.CanCollide = false
-    body.Parent = m
-
-    local wingL = Instance.new("Part")
-    wingL.Size = Vector3.new(8, 0.3, 3)
-    wingL.Color = Color3.fromRGB(180, 175, 155)
-    wingL.Anchored = true
-    wingL.CanCollide = false
-    wingL.CFrame = CFrame.new(-4.5, 0.3, 0.5) * CFrame.Angles(0, 0, math.rad(-8))
-    wingL.Parent = m
-
-    local wingR = wingL:Clone()
-    wingR.CFrame = CFrame.new(4.5, 0.3, 0.5) * CFrame.Angles(0, 0, math.rad(8))
-    wingR.Parent = m
-
-    local nose = Instance.new("Part")
-    nose.Shape = Enum.PartType.Ball
-    nose.Size = Vector3.new(2.2, 2.2, 2.2)
-    nose.Color = Color3.fromRGB(160, 45, 45)
-    nose.Material = Enum.Material.Neon
-    nose.Anchored = true
-    nose.CanCollide = false
-    nose.CFrame = CFrame.new(0, 0, -4.2)
-    nose.Parent = m
-
-    pcall(function() m.PrimaryPart = body end)
-    return m
-end
-
-local function loadDrone()
-    local inst, method = loadAsset(DRONE_ASSET_ID)
-    droneMethod = method or "?"
-    if inst then
-        local m
-        if inst:IsA("Model") then m = inst
-        elseif inst:IsA("BasePart") then m = Instance.new("Model"); inst.Parent = m
-        elseif inst:IsA("Tool") and inst:FindFirstChild("Handle") then
-            m = Instance.new("Model"); inst.Handle:Clone().Parent = m; pcall(function() inst:Destroy() end)
-        end
-        if m then
-            local cnt, vis = prepareAndCheck(m)
-            if cnt > 0 and vis > 0 then
-                setPrimary(m)
-                forceScale(m, 12)
-                m.Parent = workspace
-                return m
-            end
-        end
-        pcall(function() inst:Destroy() end)
-    end
-    droneMethod = "fallback"
-    local f = buildFallbackDrone()
-    f.Parent = workspace
-    return f
-end
-
-buildTool = function()
+local function buildTool()
     local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
     if not backpack then
         local ok, result = pcall(function() return LocalPlayer:WaitForChild("Backpack", 5) end)
@@ -598,7 +579,6 @@ buildTool = function()
                 end
             end
             if #parts == 0 then error("no parts", 0) end
-
             local largest = parts[1]
             for _, p in ipairs(parts) do
                 if p.Size.Magnitude > largest.Size.Magnitude then largest = p end
@@ -613,7 +593,6 @@ buildTool = function()
                     end
                 end
             end
-
             local t = Instance.new("Tool")
             t.Name = "Shahed Controller"
             t.RequiresHandle = true
@@ -643,6 +622,67 @@ buildTool = function()
     tool.Grip = CFrame.new(0, -1.4, -1.2) * CFrame.Angles(math.rad(-20), math.rad(90), 0)
     tool.Parent = backpack
     return tool
+end
+
+local function buildFallbackDrone()
+    local m = Instance.new("Model")
+    m.Name = "ShahedDrone"
+    local body = Instance.new("Part")
+    body.Name = "Body"
+    body.Size = Vector3.new(2, 2, 8)
+    body.Color = Color3.fromRGB(200, 195, 175)
+    body.Material = Enum.Material.SmoothPlastic
+    body.Anchored = true
+    body.CanCollide = false
+    body.Parent = m
+    local wingL = Instance.new("Part")
+    wingL.Size = Vector3.new(8, 0.3, 3)
+    wingL.Color = Color3.fromRGB(180, 175, 155)
+    wingL.Anchored = true
+    wingL.CanCollide = false
+    wingL.CFrame = CFrame.new(-4.5, 0.3, 0.5) * CFrame.Angles(0, 0, math.rad(-8))
+    wingL.Parent = m
+    local wingR = wingL:Clone()
+    wingR.CFrame = CFrame.new(4.5, 0.3, 0.5) * CFrame.Angles(0, 0, math.rad(8))
+    wingR.Parent = m
+    local nose = Instance.new("Part")
+    nose.Shape = Enum.PartType.Ball
+    nose.Size = Vector3.new(2.2, 2.2, 2.2)
+    nose.Color = Color3.fromRGB(160, 45, 45)
+    nose.Material = Enum.Material.Neon
+    nose.Anchored = true
+    nose.CanCollide = false
+    nose.CFrame = CFrame.new(0, 0, -4.2)
+    nose.Parent = m
+    pcall(function() m.PrimaryPart = body end)
+    return m
+end
+
+local function loadDrone()
+    local inst, method = loadAsset(DRONE_ASSET_ID)
+    droneMethod = method or "?"
+    if inst then
+        local m
+        if inst:IsA("Model") then m = inst
+        elseif inst:IsA("BasePart") then m = Instance.new("Model"); inst.Parent = m
+        elseif inst:IsA("Tool") and inst:FindFirstChild("Handle") then
+            m = Instance.new("Model"); inst.Handle:Clone().Parent = m; pcall(function() inst:Destroy() end)
+        end
+        if m then
+            local cnt, vis = prepareAndCheck(m)
+            if cnt > 0 and vis > 0 then
+                setPrimary(m)
+                forceScale(m, 12)
+                m.Parent = workspace
+                return m
+            end
+        end
+        pcall(function() inst:Destroy() end)
+    end
+    droneMethod = "fallback"
+    local f = buildFallbackDrone()
+    f.Parent = workspace
+    return f
 end
 
 local function makeBtn(size, pos, color, text, tsize)
@@ -734,6 +774,20 @@ batteryLbl.TextColor3 = Color3.fromRGB(0, 255, 100)
 batteryLbl.TextSize = 22
 batteryLbl.Font = Enum.Font.Code
 batteryLbl.Parent = hud
+
+local ch = Instance.new("Frame")
+ch.Size = UDim2.fromOffset(34, 2)
+ch.Position = UDim2.new(0.5, -17, 0.5, 0)
+ch.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+ch.BorderSizePixel = 0
+ch.Parent = hud
+
+local cv = Instance.new("Frame")
+cv.Size = UDim2.fromOffset(2, 34)
+cv.Position = UDim2.new(0.5, -1, 0.5, -17)
+cv.BackgroundColor3 = Color3.fromRGB(0, 255, 100)
+cv.BorderSizePixel = 0
+cv.Parent = hud
 
 local speedLbl = Instance.new("TextLabel")
 speedLbl.Size = UDim2.fromOffset(500, 26)
@@ -837,6 +891,7 @@ local function setBackpack(vis)
 end
 
 local function safeRestore()
+    stopFlightSound()
     if camSubject then pcall(function() camSubject:Destroy() end) camSubject = nil end
 
     local char = LocalPlayer.Character
@@ -888,6 +943,8 @@ local function fireRocket()
     local now = os.clock()
     if now - lastRocket < ROCKET_COOLDOWN then return end
     lastRocket = now
+
+    playShotSound()
 
     local startPos = droneCFrame.Position
     local dir = droneCFrame.LookVector
@@ -947,18 +1004,6 @@ local function fireRocket()
                             if sethiddenproperty then
                                 pcall(function() sethiddenproperty(tHum, "Health", 0) end)
                             end
-                            for _, plr2 in ipairs(Players:GetPlayers()) do
-                                if plr2 ~= LocalPlayer and plr2.Character then
-                                    local t2HRP = plr2.Character:FindFirstChild("HumanoidRootPart")
-                                    local t2Hum = plr2.Character:FindFirstChildOfClass("Humanoid")
-                                    if t2HRP and t2Hum and t2Hum.Health > 0 then
-                                        if (t2HRP.Position - impactPos).Magnitude < ROCKET_RADIUS then
-                                            pcall(function() t2Hum:TakeDamage(ROCKET_DAMAGE) end)
-                                            pcall(function() t2Hum.Health = 0 end)
-                                        end
-                                    end
-                                end
-                            end
                             pcall(function() rocket:Destroy() end)
                             return
                         end
@@ -984,9 +1029,6 @@ local function fireRocket()
                                         task.wait(0.03)
                                         firetouchinterest(rocket, tHRP, 1)
                                     end)
-                                end
-                                if sethiddenproperty then
-                                    pcall(function() sethiddenproperty(tHum, "Health", 0) end)
                                 end
                             end
                         end
@@ -1020,6 +1062,8 @@ local function jumpOff()
             end
         end
     end
+
+    stopFlightSound()
 
     droneMode = false
     crashed = false
@@ -1134,6 +1178,8 @@ local function launchDrone()
     rideBtn.Visible = false
     noclipBtn.Text = "NOCLIP"
     noclipBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 100)
+
+    startFlightSound()
     return true
 end
 
@@ -1196,6 +1242,8 @@ mountWreck = function(w)
     noclipBtn.Text = "NOCLIP"
     noclipBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 100)
     batteryLbl.Text = "BATTERY: 100%"
+
+    startFlightSound()
     return true
 end
 
@@ -1203,6 +1251,8 @@ local function crash()
     if crashed or not droneMode then return end
     crashed = true
     droneMode = false
+
+    stopFlightSound()
 
     local crashPos = droneCFrame and droneCFrame.Position or Vector3.new(0, 50, 0)
     spawnExplosion(crashPos)
@@ -1325,59 +1375,6 @@ local function startRepair(w)
         end
     end)
 end
-
-local function wireTool(t)
-    if not t then return end
-    currentController = t
-    pcall(function()
-        t.Equipped:Connect(function()
-            userHoldingController = true
-            putAwayBtn.Visible = true
-            if droneMode or repairing then return end
-            launchBtn.Visible = true
-        end)
-        t.Unequipped:Connect(function()
-            task.delay(0.15, function()
-                if not userHoldingController then
-                    launchBtn.Visible = false
-                    putAwayBtn.Visible = false
-                    return
-                end
-                local char = LocalPlayer.Character
-                if not char then return end
-                local hum = char:FindFirstChildOfClass("Humanoid")
-                if not hum then return end
-
-                local inHand = char:FindFirstChildOfClass("Tool")
-                if inHand and inHand ~= t then
-                    userHoldingController = false
-                    launchBtn.Visible = false
-                    putAwayBtn.Visible = false
-                    return
-                end
-
-                if droneMode or crashed or repairing then
-                    return
-                end
-
-                if t.Parent and not inHand then
-                    pcall(function() hum:EquipTool(t) end)
-                end
-            end)
-        end)
-    end)
-end
-
-putAwayBtn.MouseButton1Click:Connect(function()
-    userHoldingController = false
-    launchBtn.Visible = false
-    putAwayBtn.Visible = false
-    local char = LocalPlayer.Character
-    local hum = char and char:FindFirstChildOfClass("Humanoid")
-    if hum then
-        pcall(function() hum:UnequipTools() end)
-    end
-end)
 
 RunService.Heartbeat:Connect(function()
     if not droneMode or crashed then return end
@@ -1574,72 +1571,36 @@ rideBtn.MouseButton1Click:Connect(function()
     if nearest and mountWreck then mountWreck(nearest) end
 end)
 
+local function wireTool(t)
+    if not t then return end
+    pcall(function()
+        t.Equipped:Connect(function()
+            putAwayBtn.Visible = true
+            if droneMode or repairing then return end
+            launchBtn.Visible = true
+        end)
+        t.Unequipped:Connect(function()
+            launchBtn.Visible = false
+            putAwayBtn.Visible = false
+            if droneMode and not crashed and not riddenWreck then crash() end
+        end)
+    end)
+end
+
+putAwayBtn.MouseButton1Click:Connect(function()
+    launchBtn.Visible = false
+    putAwayBtn.Visible = false
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if hum then
+        pcall(function() hum:UnequipTools() end)
+    end
+end)
+
 local function buildAndWire()
     local ok, tool = pcall(buildTool)
     if ok and tool then wireTool(tool); return tool end
     return nil
-end
-
-local function installToolWatchdog()
-    local function watch(container)
-        if not container then return end
-        container.ChildRemoved:Connect(function(child)
-            if not child:IsA("Tool") then return end
-            if child.Name ~= "Shahed Controller" then return end
-            if not userHoldingController then return end
-            if droneMode or repairing or crashed then return end
-
-            task.wait(0.1)
-
-            if not userHoldingController then return end
-
-            local char = LocalPlayer.Character
-            local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
-            local stillExists = false
-            if char then
-                for _, t in ipairs(char:GetChildren()) do
-                    if t:IsA("Tool") and t.Name == "Shahed Controller" then stillExists = true break end
-                end
-            end
-            if backpack then
-                for _, t in ipairs(backpack:GetChildren()) do
-                    if t:IsA("Tool") and t.Name == "Shahed Controller" then stillExists = true break end
-                end
-            end
-
-            if stillExists then return end
-
-            local now = os.clock()
-            if now - rebuildCooldown < 0.5 then return end
-            rebuildCooldown = now
-
-            task.delay(0.05, function()
-                if not userHoldingController then return end
-                if droneMode or repairing or crashed then return end
-                local ok, tool = pcall(buildTool)
-                if ok and tool then
-                    wireTool(tool)
-                    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
-                    if hum then
-                        task.wait(0.1)
-                        if userHoldingController then
-                            pcall(function() hum:EquipTool(tool) end)
-                        end
-                    end
-                end
-            end)
-        end)
-    end
-
-    if LocalPlayer:FindFirstChildOfClass("Backpack") then
-        watch(LocalPlayer:FindFirstChildOfClass("Backpack"))
-    end
-    LocalPlayer.ChildAdded:Connect(function(child)
-        if child:IsA("Backpack") then watch(child) end
-    end)
-
-    if LocalPlayer.Character then watch(LocalPlayer.Character) end
-    LocalPlayer.CharacterAdded:Connect(function(c) if c then watch(c) end end)
 end
 
 pcall(buildAndWire)
@@ -1657,47 +1618,12 @@ LocalPlayer.ChildAdded:Connect(function(t)
     end
 end)
 
-installToolWatchdog()
-
-task.spawn(function()
-    while screen.Parent do
-        task.wait(0.3)
-        if userHoldingController and not droneMode and not repairing and not crashed then
-            local char = LocalPlayer.Character
-            local hum = char and char:FindFirstChildOfClass("Humanoid")
-            if hum and currentController then
-                local inHand = char:FindFirstChildOfClass("Tool")
-                if inHand ~= currentController then
-                    if inHand then
-                        userHoldingController = false
-                        launchBtn.Visible = false
-                        putAwayBtn.Visible = false
-                    elseif currentController.Parent then
-                        pcall(function() hum:EquipTool(currentController) end)
-                    else
-                        local ok, tool = pcall(buildTool)
-                        if ok and tool then
-                            wireTool(tool)
-                            task.wait(0.1)
-                            if userHoldingController then
-                                pcall(function() hum:EquipTool(tool) end)
-                            end
-                        end
-                    end
-                end
-            end
-        end
-    end
-end)
-
 LocalPlayer.CharacterAdded:Connect(function(char)
     if droneMode or crashed then safeRestore() end
     repairBtn.Visible, rideBtn.Visible = false, false
     repairGui.Visible = false
     repairing = false
     noclip = false
-    userHoldingController = false
-    putAwayBtn.Visible = false
 
     task.wait(1)
     pcall(buildAndWire)
@@ -1736,15 +1662,11 @@ end)
 launchBtn.MouseButton1Click:Connect(function()
     if droneMode or repairing then return end
     launchBtn.Visible = false
-    local ok, result = pcall(launchDrone)
-    if not ok or result == false then
-        task.wait(0.1)
-        safeRestore()
-    end
+    pcall(launchDrone)
 end)
 
 if LocalPlayer.Character then
-    local hum = LocalPlayer.Character:FindFirstChild("Humanoid")
+    local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
     if hum then
         hum.Died:Connect(function()
             if droneMode then crash() end
@@ -1752,7 +1674,6 @@ if LocalPlayer.Character then
     end
 end
 
--- Finish loading
 task.spawn(function()
     task.wait(3.2)
 
@@ -1762,7 +1683,6 @@ task.spawn(function()
     if ok2 and r then pcall(function() r:Destroy() end) end
 
     setProgress(100)
-
     task.wait(0.3)
 
     local fade = Instance.new("Frame")
@@ -1778,6 +1698,7 @@ task.spawn(function()
     TweenService:Create(progressFill, TweenInfo.new(0.6), {BackgroundTransparency = 1}):Play()
     TweenService:Create(progressLabel, TweenInfo.new(0.6), {TextTransparency = 1}):Play()
     TweenService:Create(statusLabel, TweenInfo.new(0.6), {TextTransparency = 1}):Play()
+    if gifImage then TweenService:Create(gifImage, TweenInfo.new(0.6), {ImageTransparency = 1}):Play() end
 
     task.wait(0.7)
 
